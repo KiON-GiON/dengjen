@@ -6,6 +6,8 @@
 
 #[cfg(feature = "espeak")]
 use dengjen_espeak_phonemizer::text_to_phonemes;
+#[cfg(feature = "espeak")]
+use unicode_normalization::UnicodeNormalization;
 #[cfg(feature = "tashkeel")]
 use dengjen_tashkeel::do_tashkeel;
 use dengjen_tts_core::{
@@ -16,6 +18,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+#[cfg(feature = "japanese")]
+mod japanese;
+#[cfg(feature = "japanese")]
+mod japanese_katakana;
 
 mod config;
 mod inference;
@@ -23,7 +29,7 @@ mod phonemize;
 mod streaming;
 pub mod synth_config;
 
-use config::{load_model_config, resolve_default_speaker_id};
+use config::{load_model_config, map_espeak_phonemes_to_ids, resolve_default_speaker_id};
 pub use config::{
     map_phonemes_to_ids, AudioConfig, ESpeakConfig, InferenceConfig, Language, ModelConfig,
     PhonemeType,
@@ -31,7 +37,7 @@ pub use config::{
 pub use inference::VitsModel;
 #[cfg(feature = "espeak")]
 use phonemize::should_diacritize;
-use phonemize::{phonemize_dispatch, HebrewEngine, PinyinEngine, TashkeelEngine};
+use phonemize::{phonemize_dispatch, HebrewEngine, JapaneseEngine, PinyinEngine, TashkeelEngine};
 pub use streaming::VitsStreamingModel;
 pub use synth_config::PiperSynthesisConfig;
 
@@ -75,6 +81,7 @@ trait VitsModelCommons {
     fn get_tashkeel_engine(&self) -> Option<&TashkeelEngine>;
     fn get_hebrew_engine(&self) -> Option<&HebrewEngine>;
     fn get_pinyin_engine(&self) -> Option<&PinyinEngine>;
+    fn get_japanese_engine(&self) -> Option<&JapaneseEngine>;
 
     fn get_meta_ids(&self) -> DengjenResult<(i64, i64, i64)> {
         let phoneme_id_map = &self.get_config().phoneme_id_map;
@@ -139,21 +146,34 @@ trait VitsModelCommons {
         Ok(())
     }
 
-    fn phonemes_to_input_ids(
-        &self,
-        phonemes: &str,
-        pad_id: i64,
-        bos_id: i64,
-        eos_id: i64,
-    ) -> Vec<i64> {
-        map_phonemes_to_ids(
-            &self.get_config().phoneme_id_map,
+fn phonemes_to_input_ids(
+    &self,
+    phonemes: &str,
+    pad_id: i64,
+    bos_id: i64,
+    eos_id: i64,
+) -> Vec<i64> {
+    let config = self.get_config();
+    match config.effective_phoneme_type() {
+        PhonemeType::Espeak => map_espeak_phonemes_to_ids(
+            &config.phoneme_id_map,
+            config.vowel_clusters.as_deref(),
             phonemes,
             pad_id,
             bos_id,
             eos_id,
-        )
+        ),
+        PhonemeType::Japanese => map_espeak_phonemes_to_ids(
+            &config.phoneme_id_map,
+            None,
+            phonemes,
+            pad_id,
+            bos_id,
+            eos_id,
+        ),
+        _ => map_phonemes_to_ids(&config.phoneme_id_map, phonemes, pad_id, bos_id, eos_id),
     }
+}
     #[cfg(feature = "espeak")]
     fn do_phonemize_text(&self, text: &str) -> DengjenResult<Phonemes> {
         let config = self.get_config();
@@ -162,6 +182,7 @@ trait VitsModelCommons {
             text,
             self.get_hebrew_engine(),
             self.get_pinyin_engine(),
+            self.get_japanese_engine()
         ) {
             return handled;
         }
@@ -172,8 +193,14 @@ trait VitsModelCommons {
             Cow::Borrowed(text)
         };
 
-        text_to_phonemes(&source, voice, None, true, false)
-            .map(Phonemes::from)
+text_to_phonemes(&source, voice, None, true, false)
+            .map(|sentences| {
+                let normalized: Vec<String> = sentences
+                    .into_iter()
+                    .map(|sentence| sentence.nfd().collect())
+                    .collect();
+                Phonemes::from(normalized)
+            })
             .map_err(|e| {
                 DengjenError::PhonemizationError(format!(
                     "Failed to phonemize given text using espeak-ng. Error: {e}"
@@ -188,6 +215,7 @@ trait VitsModelCommons {
             text,
             self.get_hebrew_engine(),
             self.get_pinyin_engine(),
+            self.get_japanese_engine()
         )
         .unwrap_or_else(|| {
             Err(DengjenError::PhonemizationError(
@@ -251,6 +279,9 @@ mod tests {
             None
         }
         fn get_pinyin_engine(&self) -> Option<&PinyinEngine> {
+            None
+        }
+        fn get_japanese_engine(&self) -> Option<&JapaneseEngine> {
             None
         }
     }
@@ -445,5 +476,57 @@ mod tests {
             msg.contains(dengjen_espeak_phonemizer::ESPEAKNG_INIT_FAILURE_MARKER),
             "wrapped message lost the inner espeak-ng error text: {msg:?}"
         );
+    }
+
+    #[test]
+    fn phonemes_to_input_ids_respects_vowel_clusters_only_for_espeak() {
+        let phoneme_id_map = HashMap::from([
+            (PAD.to_string(), vec![0]),
+            (BOS.to_string(), vec![1]),
+            (EOS.to_string(), vec![2]),
+            ("a".to_string(), vec![14]),
+            ("ɪ".to_string(), vec![74]),
+            ("aɪ".to_string(), vec![161]),
+        ]);
+
+        let espeak_without_clusters = TestVitsCommons {
+            synth_config: RwLock::new(PiperSynthesisConfig::default()),
+            config: ModelConfig {
+                phoneme_type: Some(PhonemeType::Espeak),
+                phoneme_id_map: phoneme_id_map.clone(),
+                ..Default::default()
+            },
+            speaker_map: HashMap::new(),
+        };
+        assert_eq!(
+            espeak_without_clusters.phonemes_to_input_ids("aɪ", 0, 1, 2),
+            vec![1, 0, 14, 0, 74, 0, 2]
+        );
+
+        let espeak_with_clusters = TestVitsCommons {
+            synth_config: RwLock::new(PiperSynthesisConfig::default()),
+            config: ModelConfig {
+                phoneme_type: Some(PhonemeType::Espeak),
+                phoneme_id_map: phoneme_id_map.clone(),
+                vowel_clusters: Some(vec![vec!["a".to_string(), "ɪ".to_string()]]),
+                ..Default::default()
+            },
+            speaker_map: HashMap::new(),
+        };
+        assert_eq!(
+            espeak_with_clusters.phonemes_to_input_ids("aɪ", 0, 1, 2),
+            vec![1, 0, 161, 0, 2]
+        );
+
+        let pinyin = TestVitsCommons {
+            synth_config: RwLock::new(PiperSynthesisConfig::default()),
+            config: ModelConfig {
+                phoneme_type: Some(PhonemeType::Pinyin),
+                phoneme_id_map,
+                ..Default::default()
+            },
+            speaker_map: HashMap::new(),
+        };
+        assert_eq!(pinyin.phonemes_to_input_ids("aɪ", 0, 1, 2), vec![1, 0, 161, 0, 2]);
     }
 }

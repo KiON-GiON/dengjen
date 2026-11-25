@@ -4,8 +4,8 @@ use crate::inference::{
     session_init_error, snapshot_scales_and_speaker,
 };
 use crate::phonemize::{
-    create_hebrew_engine, create_pinyin_engine, create_tashkeel_engine, HebrewEngine, PinyinEngine,
-    TashkeelEngine,
+    create_hebrew_engine, create_japanese_engine, create_pinyin_engine, create_tashkeel_engine,
+    HebrewEngine, JapaneseEngine, PinyinEngine, TashkeelEngine,
 };
 use crate::synth_config::PiperSynthesisConfig;
 use crate::VitsModelCommons;
@@ -45,6 +45,8 @@ pub struct VitsStreamingModel {
     hebrew_engine: Option<HebrewEngine>,
     #[cfg_attr(not(feature = "pinyin"), allow(dead_code))]
     pinyin_engine: Option<PinyinEngine>,
+    #[cfg_attr(not(feature = "japanese"), allow(dead_code))]
+    japanese_engine: Option<JapaneseEngine>,
 }
 
 impl VitsStreamingModel {
@@ -61,6 +63,7 @@ impl VitsStreamingModel {
         let tashkeel_engine = create_tashkeel_engine(&config)?;
         let hebrew_engine = create_hebrew_engine(&config, config_path)?;
         let pinyin_engine = create_pinyin_engine(&config, config_path)?;
+        let japanese_engine = create_japanese_engine(&config)?;
         Ok(Self {
             synth_config: RwLock::new(synth_config),
             config,
@@ -70,6 +73,7 @@ impl VitsStreamingModel {
             tashkeel_engine,
             hebrew_engine,
             pinyin_engine,
+            japanese_engine,
         })
     }
 
@@ -118,6 +122,9 @@ impl VitsModelCommons for VitsStreamingModel {
     fn get_pinyin_engine(&self) -> Option<&PinyinEngine> {
         self.pinyin_engine.as_ref()
     }
+    fn get_japanese_engine(&self) -> Option<&JapaneseEngine> {
+        self.japanese_engine.as_ref()
+    }    
 }
 
 impl DengjenModel for VitsStreamingModel {

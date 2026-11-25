@@ -16,8 +16,9 @@ tashkeel = ["dep:dengjen-tashkeel"]
 hebrew = ["dep:dengjen-hebrew-phonemizer"]
 pinyin = ["dep:dengjen-pinyin-phonemizer"]
 kurmanji = ["dep:dengjen-kurmanji-phonemizer"]
+japanese = ["dep:jpreprocess"]
 
-espeak = ["dep:dengjen-espeak-phonemizer"]
+espeak = ["dep:dengjen-espeak-phonemizer", "dep:unicode-normalization"]
 
 
 cuda = ["ort/cuda", "dengjen-tts-core/cuda"]
@@ -35,6 +36,8 @@ serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.89"
 tracing = { workspace = true }
 workspace-hack = { version = "0.1", path = "../../../workspace-hack" }
+unicode-normalization = { version = "0.1", optional = true }
+jpreprocess = { version = "=0.15.0", optional = true }
 
 [dependencies.dengjen-tashkeel]
 version = "3.0.2"

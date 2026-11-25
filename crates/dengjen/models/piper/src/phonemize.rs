@@ -17,6 +17,11 @@ pub(crate) type PinyinEngine = dengjen_pinyin_phonemizer::PinyinEngine;
 #[cfg(not(feature = "pinyin"))]
 pub(crate) type PinyinEngine = ();
 
+#[cfg(feature = "japanese")]
+pub(crate) type JapaneseEngine = crate::japanese::JapaneseG2p;
+#[cfg(not(feature = "japanese"))]
+pub(crate) type JapaneseEngine = ();
+
 #[cfg(feature = "tashkeel")]
 pub(crate) fn should_diacritize(voice: &str) -> bool {
     voice == "ar"
@@ -35,6 +40,9 @@ pub(crate) fn phonemize_dispatch(
     >,
     #[cfg_attr(not(feature = "pinyin"), allow(unused_variables))] pinyin_engine: Option<
         &PinyinEngine,
+    >,
+    #[cfg_attr(not(feature = "japanese"), allow(unused_variables))] japanese_engine: Option<
+        &JapaneseEngine,
     >,
 ) -> Option<DengjenResult<Phonemes>> {
     match phoneme_type {
@@ -69,6 +77,18 @@ pub(crate) fn phonemize_dispatch(
         #[cfg(not(feature = "kurmanji"))]
         PhonemeType::Kurmanji => Some(Err(DengjenError::PhonemizationError(
             "Phonemization for phoneme_type `Kurmanji` requires the `kurmanji` feature".to_string(),
+        ))),
+        #[cfg(feature = "japanese")]
+        PhonemeType::Japanese => Some(match japanese_engine {
+            Some(engine) => engine.phonemize(text).map(Phonemes::from),
+            None => Err(DengjenError::PhonemizationError(
+                "This voice's phoneme_type is `japanese` but no Japanese engine was initialized"
+                    .to_string(),
+            )),
+        }),
+        #[cfg(not(feature = "japanese"))]
+        PhonemeType::Japanese => Some(Err(DengjenError::PhonemizationError(
+            "Phonemization for phoneme_type `Japanese` requires the `japanese` feature".to_string(),
         ))),
     }
 }
@@ -171,19 +191,36 @@ pub(crate) fn create_pinyin_engine(
     Ok(None)
 }
 
+#[cfg(feature = "japanese")]
+pub(crate) fn create_japanese_engine(
+    config: &ModelConfig,
+) -> DengjenResult<Option<JapaneseEngine>> {
+    if config.effective_phoneme_type() != PhonemeType::Japanese {
+        return Ok(None);
+    }
+    JapaneseEngine::from_env().map(Some)
+}
+
+#[cfg(not(feature = "japanese"))]
+pub(crate) fn create_japanese_engine(
+    _config: &ModelConfig,
+) -> DengjenResult<Option<JapaneseEngine>> {
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn phonemize_dispatch_falls_through_to_espeak_for_espeak_phoneme_type() {
-        assert!(phonemize_dispatch(PhonemeType::Espeak, "hello", None, None).is_none());
+        assert!(phonemize_dispatch(PhonemeType::Espeak, "hello", None, None, None).is_none());
     }
 
     #[cfg(feature = "kurmanji")]
     #[test]
     fn phonemize_dispatch_runs_the_kurmanji_phonemizer_without_an_engine() {
-        let result = phonemize_dispatch(PhonemeType::Kurmanji, "Silav", None, None)
+        let result = phonemize_dispatch(PhonemeType::Kurmanji, "Silav", None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(result.sentences(), &vec!["sɪlˈav.".to_string()]);
@@ -192,7 +229,7 @@ mod tests {
     #[cfg(not(feature = "kurmanji"))]
     #[test]
     fn phonemize_dispatch_reports_the_missing_kurmanji_feature() {
-        let result = phonemize_dispatch(PhonemeType::Kurmanji, "Silav", None, None).unwrap();
+        let result = phonemize_dispatch(PhonemeType::Kurmanji, "Silav", None, None, None).unwrap();
         assert!(result.is_err());
     }
 
@@ -210,7 +247,7 @@ mod tests {
 
     #[test]
     fn phonemize_dispatch_passes_text_through_unchanged_for_text_phoneme_type() {
-        let result = phonemize_dispatch(PhonemeType::Text, "hello", None, None)
+        let result = phonemize_dispatch(PhonemeType::Text, "hello", None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(result.sentences(), &vec!["hello".to_string()]);
@@ -224,6 +261,7 @@ mod tests {
             "\u{05E9}\u{05DC}\u{05D5}\u{05DD}",
             None,
             None,
+            None,
         );
         assert!(result.unwrap().is_err());
     }
@@ -231,21 +269,21 @@ mod tests {
     #[cfg(not(feature = "hebrew"))]
     #[test]
     fn phonemize_dispatch_still_errors_on_hebrew_when_feature_disabled() {
-        let result = phonemize_dispatch(PhonemeType::Hebrew, "hello", None, None).unwrap();
+        let result = phonemize_dispatch(PhonemeType::Hebrew, "hello", None, None, None).unwrap();
         assert!(result.is_err());
     }
 
     #[cfg(feature = "pinyin")]
     #[test]
     fn phonemize_dispatch_delegates_pinyin_to_the_pinyin_engine_when_present() {
-        let result = phonemize_dispatch(PhonemeType::Pinyin, "\u{4F60}\u{597D}", None, None);
+        let result = phonemize_dispatch(PhonemeType::Pinyin, "\u{4F60}\u{597D}", None, None, None);
         assert!(result.unwrap().is_err());
     }
 
     #[cfg(not(feature = "pinyin"))]
     #[test]
     fn phonemize_dispatch_still_errors_on_pinyin_when_feature_disabled() {
-        let result = phonemize_dispatch(PhonemeType::Pinyin, "hello", None, None).unwrap();
+        let result = phonemize_dispatch(PhonemeType::Pinyin, "hello", None, None, None).unwrap();
         assert!(result.is_err());
     }
 
@@ -266,5 +304,26 @@ mod tests {
     fn should_diacritize_always_false_when_tashkeel_disabled() {
         assert!(!should_diacritize("ar"));
         assert!(!should_diacritize("en-us"));
+    }
+
+    #[cfg(feature = "japanese")]
+    #[test]
+    fn phonemize_dispatch_delegates_japanese_to_the_japanese_engine_when_present() {
+        let result = phonemize_dispatch(
+            PhonemeType::Japanese,
+            "こんにちは",
+            None,
+            None,
+            None,
+        );
+        assert!(result.unwrap().is_err());
+    }
+
+    #[cfg(not(feature = "japanese"))]
+    #[test]
+    fn phonemize_dispatch_errors_on_japanese_when_feature_disabled() {
+        let result =
+            phonemize_dispatch(PhonemeType::Japanese, "こんにちは", None, None, None).unwrap();
+        assert!(result.is_err());
     }
 }

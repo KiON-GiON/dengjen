@@ -1,7 +1,7 @@
 use crate::synth_config::PiperSynthesisConfig;
 use dengjen_tts_core::{DengjenError, DengjenResult};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +46,7 @@ pub enum PhonemeType {
     Pinyin,
     Hebrew,
     Kurmanji,
+    Japanese,
 }
 
 #[derive(Deserialize, Default)]
@@ -69,6 +70,8 @@ pub struct ModelConfig {
     pub(crate) phoneme_map: HashMap<i64, String>,
     pub(crate) phoneme_id_map: HashMap<String, Vec<i64>>,
     pub(crate) phoneme_type: Option<PhonemeType>,
+    #[serde(default)]
+    pub(crate) vowel_clusters: Option<Vec<Vec<String>>>,
     pub(crate) default_speaker_id: Option<i64>,
     pub(crate) hop_length: Option<usize>,
     #[cfg_attr(not(feature = "hebrew"), allow(dead_code))]
@@ -138,8 +141,9 @@ pub fn map_phonemes_to_ids(
     }
     let chars: Vec<char> = phonemes.chars().collect();
 
-    let mut phoneme_ids = Vec::with_capacity((chars.len() + 1) * 2);
+    let mut phoneme_ids = Vec::with_capacity((chars.len() + 2) * 2);
     phoneme_ids.push(bos_id);
+    phoneme_ids.push(pad_id);
     let mut cursor = 0;
     while let Some(current) = chars.get(cursor) {
         let longest_entry = longest_entry_by_first_char
@@ -163,6 +167,82 @@ pub fn map_phonemes_to_ids(
             None => cursor += 1,
         }
     }
+    phoneme_ids.push(eos_id);
+    phoneme_ids
+}
+
+pub(crate) fn map_espeak_phonemes_to_ids(
+    phoneme_id_map: &HashMap<String, Vec<i64>>,
+    vowel_clusters: Option<&[Vec<String>]>,
+    phonemes: &str,
+    pad_id: i64,
+    bos_id: i64,
+    eos_id: i64,
+) -> Vec<i64> {
+    let mut allowed_clusters: HashSet<String> = HashSet::new();
+    let mut longest_cluster_by_first_char: HashMap<char, usize> = HashMap::new();
+
+    if let Some(clusters) = vowel_clusters {
+        for cluster in clusters {
+            if cluster.len() < 2 {
+                continue;
+            }
+            let joined: String = cluster.concat();
+            let mut joined_chars = joined.chars();
+            if let Some(first) = joined_chars.next() {
+                let char_len = 1 + joined_chars.count();
+                if char_len >= 2 {
+                    let slot = longest_cluster_by_first_char.entry(first).or_insert(0);
+                    *slot = (*slot).max(char_len);
+                    allowed_clusters.insert(joined);
+                }
+            }
+        }
+    }
+
+    let chars: Vec<char> = phonemes.chars().collect();
+    let mut phoneme_ids = Vec::with_capacity((chars.len() + 2) * 2);
+    phoneme_ids.push(bos_id);
+    phoneme_ids.push(pad_id);
+
+    let mut cursor = 0;
+    let mut char_buf = [0u8; 4];
+    while let Some(&current) = chars.get(cursor) {
+        let longest_cluster = longest_cluster_by_first_char
+            .get(&current)
+            .copied()
+            .unwrap_or(0);
+        let widest = longest_cluster.min(chars.len() - cursor);
+
+        let matched_cluster = (2..=widest).rev().find_map(|width| {
+            let candidate: String = chars.iter().skip(cursor).take(width).collect();
+            allowed_clusters
+                .contains(&candidate)
+                .then_some((width, candidate))
+        });
+
+        if let Some((width, candidate)) = matched_cluster {
+            if let Some(id) = phoneme_id_map
+                .get(&candidate)
+                .and_then(|entry| entry.first().copied())
+            {
+                phoneme_ids.push(id);
+                phoneme_ids.push(pad_id);
+            }
+            cursor += width;
+        } else {
+            let key: &str = current.encode_utf8(&mut char_buf);
+            if let Some(id) = phoneme_id_map
+                .get(key)
+                .and_then(|entry| entry.first().copied())
+            {
+                phoneme_ids.push(id);
+                phoneme_ids.push(pad_id);
+            }
+            cursor += 1;
+        }
+    }
+
     phoneme_ids.push(eos_id);
     phoneme_ids
 }
@@ -346,14 +426,14 @@ mod tests {
     fn map_phonemes_to_ids_wraps_with_bos_pad_and_eos() {
         let map = single_char_phoneme_map();
         let ids = map_phonemes_to_ids(&map, "ab", 3, 1, 2);
-        assert_eq!(ids, vec![1, 4, 3, 5, 3, 2]);
+        assert_eq!(ids, vec![1, 3, 4, 3, 5, 3, 2]);
     }
 
     #[test]
     fn map_phonemes_to_ids_skips_unknown_chars() {
         let map = single_char_phoneme_map();
         let ids = map_phonemes_to_ids(&map, "azb", 3, 1, 2);
-        assert_eq!(ids, vec![1, 4, 3, 5, 3, 2]);
+        assert_eq!(ids, vec![1, 3, 4, 3, 5, 3, 2]);
     }
 
     #[test]
@@ -361,7 +441,7 @@ mod tests {
         let mut map = single_char_phoneme_map();
         map.insert("z".to_string(), vec![]);
         let ids = map_phonemes_to_ids(&map, "azb", 3, 1, 2);
-        assert_eq!(ids, vec![1, 4, 3, 5, 3, 2]);
+        assert_eq!(ids, vec![1, 3, 4, 3, 5, 3, 2]);
     }
 
     #[test]
@@ -370,7 +450,7 @@ mod tests {
         map.insert("aɪ".to_string(), vec![161]);
         map.insert("ɪ".to_string(), vec![99]);
         let ids = map_phonemes_to_ids(&map, "aɪ", 3, 1, 2);
-        assert_eq!(ids, vec![1, 161, 3, 2]);
+        assert_eq!(ids, vec![1, 3, 161, 3, 2]);
     }
 
     #[test]
@@ -382,7 +462,7 @@ mod tests {
         ]);
         let ids = map_phonemes_to_ids(&map, "ba", 0, 100, 200);
 
-        assert_eq!(ids, vec![100, 3, 0, 200]);
+        assert_eq!(ids, vec![100, 0, 3, 0, 200]);
     }
 
     #[test]
@@ -421,5 +501,76 @@ mod tests {
         let result = load_model_config(&path);
         std::fs::remove_file(&path).ok();
         assert!(matches!(result, Err(DengjenError::FailedToLoadResource(_))));
+    }
+
+#[test]
+    fn model_config_parses_vowel_clusters_when_present_and_defaults_to_none() {
+        let base: ModelConfig = serde_json::from_str(BASE_CONFIG_JSON).unwrap();
+        assert_eq!(base.vowel_clusters, None);
+
+        let with_clusters = BASE_CONFIG_JSON.replacen(
+            '{',
+            r#"{"vowel_clusters": [["a", "ɪ"], ["o", "ʊ"]],"#,
+            1,
+        );
+        let parsed: ModelConfig = serde_json::from_str(&with_clusters).unwrap();
+        assert_eq!(
+            parsed.vowel_clusters,
+            Some(vec![
+                vec!["a".to_string(), "ɪ".to_string()],
+                vec!["o".to_string(), "ʊ".to_string()],
+            ])
+        );
+    }
+
+    #[test]
+    fn map_espeak_phonemes_to_ids_merges_only_configured_vowel_clusters() {
+        let mut map = single_char_phoneme_map();
+        map.insert("e".to_string(), vec![18]);
+        map.insert("ɪ".to_string(), vec![74]);
+        map.insert("aɪ".to_string(), vec![161]);
+        map.insert("eɪ".to_string(), vec![164]);
+
+        let clusters = vec![vec!["a".to_string(), "ɪ".to_string()]];
+        let ids = map_espeak_phonemes_to_ids(&map, Some(&clusters), "aɪeɪ", 3, 1, 2);
+        assert_eq!(ids, vec![1, 3, 161, 3, 18, 3, 74, 3, 2]);
+    }
+
+    #[test]
+    fn map_espeak_phonemes_to_ids_does_not_merge_diphthongs_without_vowel_clusters() {
+        let mut map = single_char_phoneme_map();
+        map.insert("ɪ".to_string(), vec![74]);
+        map.insert("aɪ".to_string(), vec![161]);
+
+        let ids_none = map_espeak_phonemes_to_ids(&map, None, "aɪ", 3, 1, 2);
+        assert_eq!(ids_none, vec![1, 3, 4, 3, 74, 3, 2]);
+
+        let ids_empty = map_espeak_phonemes_to_ids(&map, Some(&[]), "aɪ", 3, 1, 2);
+        assert_eq!(ids_empty, vec![1, 3, 4, 3, 74, 3, 2]);
+    }
+
+    #[test]
+    fn map_espeak_phonemes_to_ids_prefers_longest_cluster_and_skips_unmapped_clusters() {
+        let mut map = single_char_phoneme_map();
+        map.insert("ɪ".to_string(), vec![74]);
+        map.insert("ə".to_string(), vec![59]);
+        map.insert("aɪ".to_string(), vec![161]);
+        map.insert("aɪə".to_string(), vec![170]);
+
+        let clusters = vec![
+            vec!["a".to_string()],
+            vec!["a".to_string(), "ɪ".to_string()],
+            vec!["a".to_string(), "ɪ".to_string(), "ə".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+        ];
+        let ids = map_espeak_phonemes_to_ids(&map, Some(&clusters), "aɪəaɪab", 3, 1, 2);
+        assert_eq!(ids, vec![1, 3, 170, 3, 161, 3, 2]);
+    }
+
+    #[test]
+    fn model_config_parses_japanese_phoneme_type() {
+        let json = BASE_CONFIG_JSON.replacen('{', r#"{"phoneme_type": "japanese","#, 1);
+        let config: ModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config.effective_phoneme_type(), PhonemeType::Japanese);
     }
 }

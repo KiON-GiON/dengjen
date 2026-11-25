@@ -1,7 +1,7 @@
 use crate::config::{load_model_config, resolve_default_speaker_id, ModelConfig};
 use crate::phonemize::{
-    create_hebrew_engine, create_pinyin_engine, create_tashkeel_engine, HebrewEngine, PinyinEngine,
-    TashkeelEngine,
+    create_hebrew_engine, create_japanese_engine, create_pinyin_engine, create_tashkeel_engine,
+    HebrewEngine, JapaneseEngine, PinyinEngine, TashkeelEngine,
 };
 use crate::synth_config::PiperSynthesisConfig;
 use crate::VitsModelCommons;
@@ -104,6 +104,8 @@ pub struct VitsModel {
     hebrew_engine: Option<HebrewEngine>,
     #[cfg_attr(not(feature = "pinyin"), allow(dead_code))]
     pinyin_engine: Option<PinyinEngine>,
+    #[cfg_attr(not(feature = "japanese"), allow(dead_code))]
+    japanese_engine: Option<JapaneseEngine>,
 }
 
 impl VitsModel {
@@ -122,6 +124,7 @@ impl VitsModel {
         let tashkeel_engine = create_tashkeel_engine(&config)?;
         let hebrew_engine = create_hebrew_engine(&config, config_path)?;
         let pinyin_engine = create_pinyin_engine(&config, config_path)?;
+        let japanese_engine = create_japanese_engine(&config)?;
         Ok(Self {
             synth_config: RwLock::new(synth_config),
             config,
@@ -131,6 +134,7 @@ impl VitsModel {
             tashkeel_engine,
             hebrew_engine,
             pinyin_engine,
+            japanese_engine,
         })
     }
     /// Runs the model on `input_phonemes` and returns the samples, with run options that
@@ -181,6 +185,9 @@ impl VitsModelCommons for VitsModel {
     fn get_pinyin_engine(&self) -> Option<&PinyinEngine> {
         self.pinyin_engine.as_ref()
     }
+    fn get_japanese_engine(&self) -> Option<&JapaneseEngine> {
+        self.japanese_engine.as_ref()
+    }    
 }
 
 impl DengjenModel for VitsModel {

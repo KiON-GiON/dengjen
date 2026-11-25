@@ -13,7 +13,7 @@ workspace = true
 [features]
 default = ["espeak", "kurmanji"]
 espeak = ["dengjen-tts-piper/espeak", "dengjen-tts-kokoro/espeak", "dengjen-tts-melotts/espeak"]
-japanese = ["dengjen-tts-kokoro/japanese"]
+japanese = ["dengjen-tts-piper/japanese", "dengjen-tts-kokoro/japanese"]
 hebrew = ["dengjen-tts-piper/hebrew"]
 pinyin = ["dengjen-tts-piper/pinyin", "dengjen-tts-melotts/pinyin"]
 kurmanji = ["dengjen-tts-piper/kurmanji"]
