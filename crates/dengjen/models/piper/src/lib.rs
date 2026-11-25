@@ -187,10 +187,11 @@ fn phonemes_to_input_ids(
             return handled;
         }
         let voice = &config.espeak.voice;
+        let source = normalize_espeak_parentheses(text);
         let source: Cow<'_, str> = if should_diacritize(voice) {
-            Cow::Owned(self.diacritize_text(text)?)
+            Cow::Owned(self.diacritize_text(&source)?)
         } else {
-            Cow::Borrowed(text)
+            source
         };
 
 text_to_phonemes(&source, voice, None, true, false)
@@ -250,6 +251,81 @@ text_to_phonemes(&source, voice, None, true, false)
             sample_width: 2,
         })
     }
+}
+
+#[cfg(feature = "espeak")]
+fn normalize_espeak_parentheses(text: &str) -> Cow<'_, str> {
+    if !text.contains(['(', ')']) {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len() + 4);
+    let mut chars = text.char_indices().peekable();
+
+    while let Some((_, ch)) = chars.next() {
+        match ch {
+            '(' => {
+                let last_non_ws = out.chars().rev().find(|c| !c.is_whitespace());
+                let needs_comma = last_non_ws.is_some_and(|prev| {
+                    !matches!(
+                        prev,
+                        ',' | ';' | ':' | '.' | '?' | '!' | '(' | '[' | '{' | '¡' | '¿' | '—'
+                    )
+                });
+                if needs_comma {
+                    while out.ends_with([' ', '\t']) {
+                        out.pop();
+                    }
+                    out.push_str(", ");
+                }
+                if out.is_empty() || out.ends_with([' ', '\t', '\n']) {
+                    while matches!(chars.peek(), Some(&(_, ' ' | '\t'))) {
+                        chars.next();
+                    }
+                }
+            }
+            ')' => {
+                let prev_non_ws = out.chars().rev().find(|c| !c.is_whitespace());
+                let has_speech_before = prev_non_ws.is_some_and(|prev| {
+                    !matches!(
+                        prev,
+                        ',' | ';' | ':' | '.' | '?' | '!' | '(' | '[' | '{' | '¡' | '¿' | '—'
+                    )
+                });
+                if has_speech_before {
+                    while out.ends_with([' ', '\t']) {
+                        out.pop();
+                    }
+                }
+                let mut lookahead = chars.clone();
+                let next_non_ws = loop {
+                    match lookahead.next() {
+                        Some((_, next)) if next.is_whitespace() => continue,
+                        Some((_, next)) => break Some(next),
+                        None => break None,
+                    }
+                };
+                let needs_comma = has_speech_before
+                    && next_non_ws.is_some_and(|next| {
+                        !matches!(
+                            next,
+                            ',' | ';' | ':' | '.' | '?' | '!' | ')' | ']' | '}' | '…' | '—'
+                        )
+                    });
+                if needs_comma {
+                    out.push_str(", ");
+                }
+                if needs_comma || out.is_empty() || out.ends_with([' ', '\t', '\n']) {
+                    while matches!(chars.peek(), Some(&(_, ' ' | '\t'))) {
+                        chars.next();
+                    }
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -528,5 +604,30 @@ mod tests {
             speaker_map: HashMap::new(),
         };
         assert_eq!(pinyin.phonemes_to_input_ids("aɪ", 0, 1, 2), vec![1, 0, 161, 0, 2]);
+    }
+
+    #[cfg(feature = "espeak")]
+    #[test]
+    fn normalize_espeak_parentheses_inserts_comma_pauses_cleanly() {
+        assert_eq!(
+            normalize_espeak_parentheses("Hola (mundo) adiós.").as_ref(),
+            "Hola, mundo, adiós."
+        );
+        assert_eq!(
+            normalize_espeak_parentheses("(Hola) adiós.").as_ref(),
+            "Hola, adiós."
+        );
+        assert_eq!(
+            normalize_espeak_parentheses("Hola (mundo).").as_ref(),
+            "Hola, mundo."
+        );
+        assert_eq!(
+            normalize_espeak_parentheses("Hola, (mundo), adiós.").as_ref(),
+            "Hola, mundo, adiós."
+        );
+        assert_eq!(
+            normalize_espeak_parentheses("Hola () adiós.").as_ref(),
+            "Hola, adiós."
+        );
     }
 }

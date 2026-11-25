@@ -22,6 +22,10 @@ const CLAUSE_INTONATION_COMMA: i32 = 0x00001000;
 const CLAUSE_INTONATION_QUESTION: i32 = 0x00002000;
 const CLAUSE_INTONATION_EXCLAMATION: i32 = 0x00003000;
 const CLAUSE_TYPE_SENTENCE: i32 = 0x00080000;
+const CLAUSE_TYPE_CLAUSE: i32 = 0x00040000;
+
+const CLAUSE_COLON: i32 = 30 | CLAUSE_INTONATION_FULL_STOP | CLAUSE_TYPE_CLAUSE;
+const CLAUSE_SEMICOLON: i32 = 30 | CLAUSE_INTONATION_COMMA | CLAUSE_TYPE_CLAUSE;
 
 const DENGJEN_ESPEAKNG_DATA_DIRECTORY: &str = "DENGJEN_ESPEAKNG_DATA_DIRECTORY";
 
@@ -115,12 +119,18 @@ fn init_espeakng() -> ESpeakResult<()> {
 }
 
 fn clause_break_suffix(terminator: ffi::c_int) -> &'static str {
-    match terminator & 0x0000_F000 {
-        CLAUSE_INTONATION_FULL_STOP => ".",
-        CLAUSE_INTONATION_COMMA => ",",
-        CLAUSE_INTONATION_QUESTION => "?",
-        CLAUSE_INTONATION_EXCLAMATION => "!",
-        _ => "",
+    // Keep pause, intonation, and clause/sentence flags while ignoring optional-space
+    // and speak-punctuation bits (e.g. on ellipsis `...` / `…`).
+    match terminator & 0x000C_70FF {
+        CLAUSE_COLON => ": ",
+        CLAUSE_SEMICOLON => "; ",
+        _ => match terminator & 0x0000_F000 {
+            CLAUSE_INTONATION_FULL_STOP => ".",
+            CLAUSE_INTONATION_COMMA => ", ",
+            CLAUSE_INTONATION_QUESTION => "?",
+            CLAUSE_INTONATION_EXCLAMATION => "!",
+            _ => "",
+        },
     }
 }
 
@@ -464,5 +474,28 @@ mod tests {
     fn espeak_error_display_includes_the_message() {
         let err = ESpeakError("boom".to_string());
         assert_eq!(err.to_string(), "eSpeak-ng Error :boom");
+    }
+
+    #[test]
+    fn clause_breaks_include_space_for_commas_colons_semicolons_and_ellipsis() -> ESpeakResult<()> {
+        let ellipsis = text_to_phonemes("Hello... world.", "en-US", None, true, false)?.join("");
+        assert!(
+            ellipsis.contains("; ") || ellipsis.contains(", "),
+            "expected pause + space for ellipsis, got {ellipsis:?}"
+        );
+
+        let unicode_ellipsis =
+            text_to_phonemes("Hello… world.", "en-US", None, true, false)?.join("");
+        assert!(
+            unicode_ellipsis.contains("; ") || unicode_ellipsis.contains(", "),
+            "expected pause + space for unicode ellipsis, got {unicode_ellipsis:?}"
+        );
+
+        let colon = text_to_phonemes("Hello: world.", "en-US", None, true, false)?.join("");
+        assert!(colon.contains(": "), "expected `: ` in {colon:?}");
+
+        let comma = text_to_phonemes("Hello, world.", "en-US", None, true, false)?.join("");
+        assert!(comma.contains(", "), "expected `, ` in {comma:?}");
+        Ok(())
     }
 }
